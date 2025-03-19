@@ -5,7 +5,8 @@ const cors = require("cors");
 const Tesseract = require("tesseract.js");
 const fs = require("fs");
 const path = require("path");
-const poppler = require("pdf-poppler");
+const pdfParse = require("pdf-parse");
+const { fromPath } = require("pdf2pic");
 
 const app = express();
 app.use(cors());
@@ -39,16 +40,35 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Function to convert PDF to image
+// Function to extract text from PDF (for text-based PDFs)
+const extractTextFromPDF = async (pdfPath) => {
+  try {
+    const dataBuffer = fs.readFileSync(pdfPath);
+    const data = await pdfParse(dataBuffer);
+    return data.text.trim();
+  } catch (error) {
+    console.error("Error extracting text from PDF:", error);
+    return "";
+  }
+};
+
+// Function to convert scanned PDFs to images using pdf2pic
 const convertPdfToImages = async (pdfPath) => {
-  const outputPath = pdfPath.replace(".pdf", ""); // Remove .pdf extension
-  const opts = { format: "png", out_dir: path.dirname(pdfPath), out_prefix: path.basename(outputPath), page: null };
+  const outputDir = path.dirname(pdfPath);
+  const outputPrefix = path.basename(pdfPath, ".pdf");
+
+  const converter = fromPath(pdfPath, {
+    density: 300,
+    saveFilename: outputPrefix,
+    savePath: outputDir,
+    format: "png",
+    width: 1000,
+    height: 1000,
+  });
 
   try {
-    await poppler.convert(pdfPath, opts);
-    return fs.readdirSync(path.dirname(pdfPath))
-      .filter((file) => file.startsWith(path.basename(outputPath)) && file.endsWith(".png"))
-      .map((file) => path.join(path.dirname(pdfPath), file));
+    const images = await converter.bulk(-1); // Convert all pages
+    return images.map((img) => img.path); // Return image paths
   } catch (error) {
     console.error("Error converting PDF to images:", error);
     return [];
@@ -58,31 +78,33 @@ const convertPdfToImages = async (pdfPath) => {
 // File Upload & OCR Processing
 app.post("/upload", upload.array("files"), async (req, res) => {
   try {
-    if (!req.files || req.files.length === 0)  {
+    if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No files uploaded." });
-
     }
-    
+
     let results = [];
 
     for (const file of req.files) {
       let extractedText = "";
 
       if (file.mimetype === "application/pdf") {
-        // Convert PDF to images
-        const imagePaths = await convertPdfToImages(file.path);
+        // Try extracting text directly
+        extractedText = await extractTextFromPDF(file.path);
 
-        // Process each image with OCR
-        for (const imagePath of imagePaths) {
-          const { data } = await Tesseract.recognize(imagePath, "eng");
-          extractedText += data.text.trim() + "\n";
-          fs.unlinkSync(imagePath); // Delete the temporary image
+        if (!extractedText) {
+          // If no text was extracted, treat it as a scanned PDF and use OCR
+          const imagePaths = await convertPdfToImages(file.path);
+
+          for (const imagePath of imagePaths) {
+            const { data } = await Tesseract.recognize(imagePath, "eng");
+            extractedText += data.text.trim() + "\n";
+            fs.unlinkSync(imagePath); // Delete temporary images
+          }
         }
       } else {
-        // Directly process image files
+        // Process image files with OCR
         const { data } = await Tesseract.recognize(file.path, "eng");
         extractedText = data.text.trim();
-        
       }
 
       // Save to database
@@ -98,8 +120,6 @@ app.post("/upload", upload.array("files"), async (req, res) => {
     console.error("Upload Error:", error);
     res.status(500).json({ error: "Server error during file upload" });
   }
- 
-
 });
 
 // Fetch Processed Files
@@ -111,7 +131,6 @@ app.get("/files", async (req, res) => {
     console.error("Database Fetch Error:", error);
     res.status(500).json({ error: "Error retrieving files" });
   }
-  console.log("file uploaded sucessfuly");
 });
 
 // Start Server
