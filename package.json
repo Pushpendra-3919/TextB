@@ -2,6 +2,10 @@
 "start": "node app.js",
 "dev": "nodemon app.js"
 }
+"engines": {
+  "node": "18.x"
+}
+
 {
   "dependencies": {
     "cors": "^2.8.5",
